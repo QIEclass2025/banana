@@ -1,0 +1,135 @@
+import tkinter as tk
+from tkinter import ttk
+import requests
+import random
+import threading
+from PIL import Image, ImageTk
+import io
+
+# --- 기존 게임 로직 (API 호출, 등급 분류 등) ---
+API_URL = "https://pokeapi.co/api/v2"
+LEGENDARY_POKEMON = [
+    "articuno", "zapdos", "moltres", "mewtwo", "raikou", "entei", "suicune", 
+    "lugia", "ho-oh", "kyogre", "groudon", "rayquaza"
+]
+MYTHICAL_POKEMON = [
+    "mew", "celebi", "jirachi", "deoxys", "manaphy", "darkrai", "arceus"
+]
+RARITY_PROBABILITY = {"환상": 0.01, "전설": 0.05}
+COMMON_POKEMON = []
+POKEMON_LISTS_PREPARED = False
+
+def prepare_pokemon_lists():
+    global COMMON_POKEMON, POKEMON_LISTS_PREPARED
+    if POKEMON_LISTS_PREPARED: return True
+    try:
+        response = requests.get(f"{API_URL}/pokemon?limit=10000")
+        response.raise_for_status()
+        all_pokemon_names = {p['name'] for p in response.json()['results']}
+        common_names = all_pokemon_names - set(LEGENDARY_POKEMON) - set(MYTHICAL_POKEMON)
+        COMMON_POKEMON = list(common_names)
+        POKEMON_LISTS_PREPARED = True
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
+def get_pokemon_details(name):
+    try:
+        response = requests.get(f"{API_URL}/pokemon/{name}")
+        response.raise_for_status()
+        data = response.json()
+        species_response = requests.get(data['species']['url'])
+        species_response.raise_for_status()
+        species_data = species_response.json()
+        korean_name = next((n['name'] for n in species_data['names'] if n['language']['name'] == 'ko'), name)
+        return {"name": korean_name, "sprite_url": data['sprites']['front_default']}
+    except requests.exceptions.RequestException:
+        return {"name": name.capitalize(), "sprite_url": None}
+
+# --- GUI 애플리케이션 클래스 ---
+class PokemonGachaApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("포켓몬 뽑기 게임")
+        self.root.geometry("400x500")
+
+        # 스타일 설정
+        style = ttk.Style()
+        style.configure("TButton", font=("Helvetica", 12), padding=10)
+        style.configure("TLabel", font=("Helvetica", 10))
+        style.configure("Result.TLabel", font=("Helvetica", 14, "bold"))
+
+        # 위젯 생성
+        self.info_label = ttk.Label(root, text="버튼을 눌러 포켓몬을 뽑아보세요!", style="TLabel")
+        self.info_label.pack(pady=10)
+
+        self.draw_button = ttk.Button(root, text="뽑기!", command=self.start_draw_thread, style="TButton")
+        self.draw_button.pack(pady=10)
+
+        self.image_label = ttk.Label(root)
+        self.image_label.pack(pady=10)
+
+        self.result_label = ttk.Label(root, text="", style="Result.TLabel")
+        self.result_label.pack(pady=10)
+
+        # 포켓몬 목록 준비
+        threading.Thread(target=self.initial_setup, daemon=True).start()
+
+    def initial_setup(self):
+        self.info_label.config(text="(초기 데이터 로딩 중...)")
+        self.draw_button.config(state=tk.DISABLED)
+        if prepare_pokemon_lists():
+            self.info_label.config(text="버튼을 눌러 포켓몬을 뽑아보세요!")
+            self.draw_button.config(state=tk.NORMAL)
+        else:
+            self.info_label.config(text="[오류] 데이터 로딩 실패. 인터넷 연결을 확인하세요.")
+
+    def start_draw_thread(self):
+        self.draw_button.config(state=tk.DISABLED)
+        self.result_label.config(text="뽑는 중...")
+        self.image_label.config(image='')
+        threading.Thread(target=self.run_draw_logic, daemon=True).start()
+
+    def run_draw_logic(self):
+        # 1. 등급 및 포켓몬 결정
+        rand = random.random()
+        if rand < RARITY_PROBABILITY["환상"]:
+            rarity, chosen_list = "환상", MYTHICAL_POKEMON
+        elif rand < RARITY_PROBABILITY["전설"]:
+            rarity, chosen_list = "전설", LEGENDARY_POKEMON
+        else:
+            rarity, chosen_list = "일반", COMMON_POKEMON
+        pokemon_name_en = random.choice(chosen_list)
+
+        # 2. 상세 정보 및 이미지 데이터 가져오기
+        details = get_pokemon_details(pokemon_name_en)
+        image_data = None
+        if details["sprite_url"]:
+            try:
+                image_response = requests.get(details["sprite_url"])
+                image_response.raise_for_status()
+                image_data = image_response.content
+            except requests.exceptions.RequestException:
+                image_data = None
+        
+        # 3. GUI 업데이트 스케줄링
+        self.root.after(0, self.update_ui, rarity, details, image_data)
+
+    def update_ui(self, rarity, details, image_data):
+        # 이미지 표시
+        if image_data:
+            img = Image.open(io.BytesIO(image_data))
+            img = img.resize((150, 150), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self.image_label.config(image=photo)
+            self.image_label.image = photo # 참조 유지
+        
+        # 텍스트 표시
+        self.result_label.config(text=f"[{rarity}] {details['name']}을(를) 뽑았습니다!")
+        self.draw_button.config(state=tk.NORMAL)
+
+# --- 애플리케이션 실행 ---
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PokemonGachaApp(root)
+    root.mainloop()
